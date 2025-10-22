@@ -1,0 +1,44 @@
+{
+  "name": "nexo-ai",
+  "version": "1.0.0",
+  "description": "Nexo.ai - AI-powered website builder that creates professional websites from natural language descriptions",
+  "license": "MIT",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "enhanced": "node start.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@google/genai": "^1.7.0",
+    "@supabase/supabase-js": "^2.75.0",
+    "bcryptjs": "^3.0.2",
+    "body-parser": "^2.2.0",
+    "child_process": "^1.0.2",
+    "connect-mongo": "^5.1.0",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "express-session": "^1.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "jszip": "^3.10.1",
+    "mongoose": "^8.19.1",
+    "multer": "^2.0.2",
+    "node-fetch": "^3.3.2",
+    "os": "^0.1.2",
+    "util": "^0.12.5"
+  },
+  "keywords": [
+    "ai",
+    "website-builder",
+    "gemini",
+    "nodejs",
+    "express",
+    "web-development"
+  ],
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
