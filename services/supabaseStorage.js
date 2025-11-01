@@ -25,9 +25,12 @@ class SupabaseStorageService {
     /**
      * Save file to Supabase Storage
      */
-    async saveFile(projectName, fileName, content) {
+    async saveFile(projectName, fileName, content, userId = null) {
         try {
-            const filePath = `${projectName}/${fileName}`;
+            // Create user-specific folder structure if userId provided
+            const filePath = userId 
+                ? `users/${userId}/${projectName}/${fileName}`
+                : `${projectName}/${fileName}`;
             
             console.log(`📤 Uploading to Supabase: ${filePath}`);
             
@@ -66,9 +69,11 @@ class SupabaseStorageService {
     /**
      * Read file from Supabase Storage
      */
-    async readFile(projectName, fileName) {
+    async readFile(projectName, fileName, userId = null) {
         try {
-            const filePath = `${projectName}/${fileName}`;
+            const filePath = userId 
+                ? `users/${userId}/${projectName}/${fileName}`
+                : `${projectName}/${fileName}`;
             
             const { data, error } = await supabase.storage
                 .from(this.bucket)
@@ -90,11 +95,13 @@ class SupabaseStorageService {
     /**
      * List all projects from Supabase Storage
      */
-    async listProjects() {
+    async listProjects(userId = null) {
         try {
+            const listPath = userId ? `users/${userId}` : '';
+            
             const { data, error } = await supabase.storage
                 .from(this.bucket)
-                .list('', {
+                .list(listPath, {
                     limit: 1000,
                     offset: 0,
                     sortBy: { column: 'name', order: 'asc' }
@@ -120,13 +127,13 @@ class SupabaseStorageService {
     /**
      * Read all files from a project
      */
-    async readAllProjectFiles(projectName) {
+    async readAllProjectFiles(projectName, userId = null) {
         const files = {};
         const fileTypes = ['index.html', 'style.css', 'script.js', 'README.md'];
         
         for (const fileName of fileTypes) {
             try {
-                const content = await this.readFile(projectName, fileName);
+                const content = await this.readFile(projectName, fileName, userId);
                 files[fileName] = content;
             } catch (error) {
                 // File doesn't exist, skip it
@@ -140,12 +147,16 @@ class SupabaseStorageService {
     /**
      * Delete project from Supabase Storage
      */
-    async deleteProject(projectName) {
+    async deleteProject(projectName, userId = null) {
         try {
+            const projectPath = userId 
+                ? `users/${userId}/${projectName}`
+                : projectName;
+            
             // List all files in project folder
             const { data: files, error: listError } = await supabase.storage
                 .from(this.bucket)
-                .list(projectName);
+                .list(projectPath);
 
             if (listError) {
                 throw new Error(`Supabase list error: ${listError.message}`);
@@ -156,7 +167,7 @@ class SupabaseStorageService {
             }
 
             // Delete all files in the folder
-            const filePaths = files.map(file => `${projectName}/${file.name}`);
+            const filePaths = files.map(file => `${projectPath}/${file.name}`);
             
             const { error: deleteError } = await supabase.storage
                 .from(this.bucket)
@@ -176,8 +187,10 @@ class SupabaseStorageService {
     /**
      * Get public URL for a file
      */
-    async getPublicUrl(projectName, fileName) {
-        const filePath = `${projectName}/${fileName}`;
+    async getPublicUrl(projectName, fileName, userId = null) {
+        const filePath = userId 
+            ? `users/${userId}/${projectName}/${fileName}`
+            : `${projectName}/${fileName}`;
         const { data } = supabase.storage
             .from(this.bucket)
             .getPublicUrl(filePath);
@@ -188,11 +201,15 @@ class SupabaseStorageService {
     /**
      * Check if project exists
      */
-    async projectExists(projectName) {
+    async projectExists(projectName, userId = null) {
         try {
+            const projectPath = userId 
+                ? `users/${userId}/${projectName}`
+                : projectName;
+            
             const { data, error } = await supabase.storage
                 .from(this.bucket)
-                .list(projectName, { limit: 1 });
+                .list(projectPath, { limit: 1 });
             
             return !error && data && data.length > 0;
         } catch (error) {

@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import express from 'express';
+import cors from 'cors';
 import { exec } from "child_process";
 import { promisify } from "util";
 import os from 'os';
@@ -16,7 +17,9 @@ import multer from 'multer';
 // Load environment variables FIRST
 dotenv.config();
 
-// Import routes
+// Import routes and middleware
+import Project from './models/Project.js';
+import { authenticate, optionalAuth } from './middleware/auth.js';
 // Note: `authRoutes` are imported dynamically later after dotenv has loaded
 
 // Storage service will be imported dynamically after env vars are loaded
@@ -67,10 +70,10 @@ mongoose.connect(MONGODB_URI)
 });
 
 // Helper: convert project files to Vercel format (now uses storage service)
-async function folderToVercelFiles(projectName) {
+async function folderToVercelFiles(projectName, userId = null) {
   try {
     const files = [];
-    const projectFiles = await storage.readAllProjectFiles(projectName);
+    const projectFiles = await storage.readAllProjectFiles(projectName, userId);
     
     for (const [fileName, content] of Object.entries(projectFiles)) {
       files.push({ file: fileName, data: content });
@@ -78,14 +81,23 @@ async function folderToVercelFiles(projectName) {
     
     return files;
   } catch (error) {
-    console.error('Error reading project files:', error);
+    console.error('Error reading project files for Vercel:', error);
     return [];
   }
 }
 
 // Middleware
+// CORS Configuration - Allow frontend to connect from different domain
+app.use(cors({
+    origin: process.env.FRONTEND_URL || '*', // Set FRONTEND_URL in .env for production
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
-app.use(express.static(path.join(__dirname, '../frontend/public')));
+// Remove static file serving - frontend will be deployed separately
+// app.use(express.static(path.join(__dirname, '../frontend/public')));
 app.use(express.urlencoded({ extended: true }));
 
 // Configure multer for file uploads (store in memory temporarily)
@@ -164,7 +176,7 @@ async function executeCommand({ command }) {
 }
 
 // Enhanced tool to write content to a file (now uses storage service)
-async function writeToFile({ filePath, content }) {
+async function writeToFile({ filePath, content }, userId = null) {
     try {
         // Wait for storage to be initialized
         if (!storage || !storageReady) {
@@ -192,10 +204,10 @@ async function writeToFile({ filePath, content }) {
         const projectName = pathParts[projectsIndex + 1];
         const fileName = pathParts[projectsIndex + 2];
 
-        console.log(`📝 Writing file: ${projectName}/${fileName}`);
+        console.log(`📝 Writing file: ${projectName}/${fileName} for user: ${userId || 'anonymous'}`);
 
-        // Use storage service (Supabase only)
-        const result = await storage.saveFile(projectName, fileName, content);
+        // Use storage service (Supabase only) with userId
+        const result = await storage.saveFile(projectName, fileName, content, userId);
         console.log(`✅ File saved to Supabase: ${projectName}/${fileName}`);
         return `Success: Content written to ${fileName} in project ${projectName}`;
     } catch (error) {
@@ -216,9 +228,9 @@ async function listProjects() {
 }
 
 // Enhanced tool to read project files (now uses storage service)
-async function readProjectFiles({ projectName }) {
+async function readProjectFiles({ projectName }, userId = null) {
     try {
-        const files = await storage.readAllProjectFiles(projectName);
+        const files = await storage.readAllProjectFiles(projectName, userId);
         
         if (Object.keys(files).length === 0) {
             return `Error: Project ${projectName} not found or has no files`;
@@ -231,10 +243,10 @@ async function readProjectFiles({ projectName }) {
 }
 
 // New tool to update existing project files (now uses storage service)
-async function updateProjectFiles({ projectName, updates }) {
+async function updateProjectFiles({ projectName, updates }, userId = null) {
     try {
         // Check if project exists
-        const exists = await storage.projectExists(projectName);
+        const exists = await storage.projectExists(projectName, userId);
         if (!exists) {
             return `Error: Project ${projectName} not found`;
         }
@@ -242,7 +254,7 @@ async function updateProjectFiles({ projectName, updates }) {
         const results = {};
         for (const [fileType, content] of Object.entries(updates)) {
             try {
-                await storage.saveFile(projectName, fileType, content);
+                await storage.saveFile(projectName, fileType, content, userId);
                 results[fileType] = 'Updated successfully';
             } catch (err) {
                 results[fileType] = `Failed: ${err.message}`;
@@ -256,55 +268,170 @@ async function updateProjectFiles({ projectName, updates }) {
 }
 
 // New tool to deploy project to Vercel (now uses storage service)
-async function deployProject({ projectName, siteName = null }) {
+async function deployProject({ projectName, siteName = null }, userId = null) {
     try {
-        // Check if project exists in storage
-        const exists = await storage.projectExists(projectName);
+        console.log(`🚀 Starting deployment for project: ${projectName}, user: ${userId}`);
+        
+        // Check if project exists in storage with userId
+        const exists = await storage.projectExists(projectName, userId);
         if (!exists) {
+            console.error(`❌ Project ${projectName} not found for user ${userId}`);
             return `Error: Project ${projectName} not found`;
         }
 
         // Check if Vercel token is available
         if (!VERCEL_TOKEN) {
+            console.error('❌ VERCEL_TOKEN not set in environment variables');
             return `Error: VERCEL_TOKEN environment variable is required for deployment. Please set your Vercel token.`;
         }
 
-        // Deploy project using Vercel API
-        const files = await folderToVercelFiles(projectName);
+        // Deploy project using Vercel API with userId
+        console.log(`📦 Reading project files for: ${projectName}`);
+        const files = await folderToVercelFiles(projectName, userId);
         
         if (files.length === 0) {
+            console.error(`❌ No files found in project ${projectName}`);
             return `Error: No files found in project ${projectName}`;
         }
 
+        console.log(`✅ Found ${files.length} files to deploy:`, files.map(f => f.file).join(', '));
+
+        // Create a clean, short project name
+        // Remove special characters and convert to lowercase
+        const cleanProjectName = projectName
+            .toLowerCase()
+            .replace(/[^a-z0-9-]/g, '-')  // Replace special chars with hyphens
+            .replace(/--+/g, '-')          // Replace multiple hyphens with single
+            .replace(/^-|-$/g, '')         // Remove leading/trailing hyphens
+            .substring(0, 50);             // Limit length
+        
+        console.log(`📝 Clean project name for Vercel: ${cleanProjectName}`);
+
+        // Step 1: Try to create or link to a Vercel project for shorter URLs
+        let vercelProjectName = cleanProjectName;
+        
+        try {
+            console.log(`🔍 Checking if Vercel project exists: ${cleanProjectName}`);
+            
+            // Try to create a Vercel project (this gives us a permanent short URL)
+            const projectResponse = await fetch("https://api.vercel.com/v9/projects", {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${VERCEL_TOKEN}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    name: cleanProjectName,
+                    framework: null
+                })
+            });
+
+            const projectResult = await projectResponse.json();
+            
+            if (projectResponse.ok) {
+                console.log(`✅ Created new Vercel project: ${cleanProjectName}`);
+                vercelProjectName = projectResult.name;
+            } else if (projectResult.error?.code === 'project_already_exists') {
+                console.log(`✅ Using existing Vercel project: ${cleanProjectName}`);
+                vercelProjectName = cleanProjectName;
+            } else {
+                console.log(`⚠️ Could not create project, using deployment-only mode:`, projectResult.error?.message);
+            }
+        } catch (error) {
+            console.log(`⚠️ Project creation skipped:`, error.message);
+        }
+
+        // Prepare deployment payload
+        const deploymentPayload = {
+            name: vercelProjectName,  // Use the project name
+            project: vercelProjectName,  // Link to the project for short URLs
+            files: files,
+            projectSettings: {
+                framework: null,
+                buildCommand: null,
+                devCommand: null,
+                installCommand: null,
+                outputDirectory: null
+            },
+            target: 'production',
+            gitMetadata: {
+                remoteUrl: `https://nexo.ai/project/${vercelProjectName}`,
+                commitRef: 'main',
+                commitSha: Date.now().toString(36)
+            }
+        };
+
+        console.log(`📤 Sending deployment request to Vercel...`);
+        console.log(`Project name: ${deploymentPayload.name}`);
+        
         const response = await fetch("https://api.vercel.com/v13/deployments", {
             method: "POST",
             headers: {
                 Authorization: `Bearer ${VERCEL_TOKEN}`,
                 "Content-Type": "application/json"
             },
-            body: JSON.stringify({
-                name: `${projectName}-${Date.now()}`,
-                files,
-                projectSettings: {
-                    framework: null,
-                    devCommand: null,
-                    buildCommand: null,
-                    outputDirectory: null
-                }
-            })
+            body: JSON.stringify(deploymentPayload)
         });
 
-        const result = await response.json();
-        if (result.error) {
-            return `Error: ${result.error.message}`;
+        const responseText = await response.text();
+        console.log(`📥 Vercel API Response Status: ${response.status}`);
+        console.log(`📥 Vercel API Response: ${responseText}`);
+
+        let result;
+        try {
+            result = JSON.parse(responseText);
+        } catch (e) {
+            console.error('❌ Failed to parse Vercel response:', e);
+            return `Error: Invalid response from Vercel API: ${responseText.substring(0, 200)}`;
         }
+
+        // Check for errors in response
+        if (!response.ok) {
+            console.error('❌ Vercel API returned error:', result);
+            const errorMessage = result.error?.message || result.message || 'Unknown error';
+            return `Error: Vercel deployment failed - ${errorMessage}`;
+        }
+
+        if (result.error) {
+            console.error('❌ Deployment error:', result.error);
+            return `Error: ${result.error.message || JSON.stringify(result.error)}`;
+        }
+
+        // Verify we got a URL back
+        if (!result.url) {
+            console.error('❌ No URL in Vercel response:', result);
+            return `Error: Deployment completed but no URL was returned. Response: ${JSON.stringify(result).substring(0, 200)}`;
+        }
+
+        // Get the best URL - prefer production alias over preview URL
+        let deploymentUrl = result.url;
+        
+        // Check if there's a production alias (shorter URL)
+        if (result.alias && result.alias.length > 0) {
+            // Use the shortest alias (usually the production one)
+            const shortestAlias = result.alias.sort((a, b) => a.length - b.length)[0];
+            deploymentUrl = shortestAlias;
+            console.log(`✅ Using production alias: ${shortestAlias}`);
+        } else if (vercelProjectName) {
+            // Construct the expected production URL
+            deploymentUrl = `${vercelProjectName}.vercel.app`;
+            console.log(`✅ Using project URL: ${deploymentUrl}`);
+        }
+
+        console.log(`✅ Deployment successful! URL: https://${deploymentUrl}`);
+        console.log(`Deployment ID: ${result.id || 'N/A'}`);
 
         // Create a README with Vercel deployment instructions
         const deploymentReadme = `# 🚀 Vercel Deployment Guide
 
 ## Your website "${projectName}" has been deployed to Vercel!
 
-### 🌐 Live URL: https://${result.url}
+### 🌐 Live URL: https://${deploymentUrl}
+
+### 📊 Deployment Details:
+- **Deployment ID**: ${result.id || 'N/A'}
+- **Deployed At**: ${new Date().toLocaleString()}
+- **Status**: ${result.readyState || 'READY'}
 
 ### 📁 Project Files:
 - ✅ index.html (main page)
@@ -315,7 +442,7 @@ async function deployProject({ projectName, siteName = null }) {
 ### 🔧 How to Update Your Site:
 1. Edit files in the "${projectName}" folder
 2. Use the update feature in the website builder
-3. Changes will be automatically deployed
+3. Redeploy to see changes live
 
 ### 📱 Features:
 - ✅ Responsive design
@@ -328,7 +455,7 @@ async function deployProject({ projectName, siteName = null }) {
 
 ### 🎯 Vercel Benefits:
 - **Lightning Fast**: Global CDN for instant loading
-- **Automatic Deployments**: Every update goes live instantly
+- **Automatic HTTPS**: Secure by default
 - **Zero Configuration**: Works out of the box
 - **Custom Domains**: Add your own domain anytime
 - **Analytics**: Built-in performance monitoring
@@ -342,15 +469,23 @@ async function deployProject({ projectName, siteName = null }) {
 Happy deploying! 🎉
 `;
 
-        // Save README to storage
-        await storage.saveFile(projectName, 'README.md', deploymentReadme);
+        // Save README to storage with userId
+        await storage.saveFile(projectName, 'README.md', deploymentReadme, userId);
+        console.log(`✅ README.md saved to project`);
 
         return `Success: Project "${projectName}" deployed to Vercel!
 
-🌐 Live URL: https://${result.url}
+🌐 Live URL: https://${deploymentUrl}
 
-📁 Files created:
-- README.md (deployment guide with live URL)
+� Deployment Details:
+- Deployment ID: ${result.id || 'N/A'}
+- Status: ${result.readyState || 'READY'}
+
+📁 Files deployed:
+- index.html
+- style.css
+- script.js
+- README.md (deployment guide)
 
 🚀 Your website is now live and accessible worldwide!
 - Global CDN for fast loading
@@ -358,10 +493,11 @@ Happy deploying! 🎉
 - Zero configuration required
 - Ready for custom domains
 
-Your website is live in seconds! 🌐`;
+Visit your website: https://${deploymentUrl} 🌐`;
 
     } catch (error) {
-        return `Error: ${error}`;
+        console.error('❌ Deployment error:', error);
+        return `Error: Deployment failed - ${error.message}`;
     }
 }
 
@@ -446,12 +582,18 @@ const executeCommandDeclaration = {
 
 const writeToFileDeclaration = {
     name: "writeToFile",
-    description: "Write content into a file",
+    description: `Write content into a file. IMPORTANT: filePath must be in format "projects/PROJECT_NAME/FILENAME" where PROJECT_NAME is the exact project name provided and FILENAME is one of: index.html, style.css, or script.js`,
     parameters: {
         type: 'OBJECT',
         properties: {
-            filePath: { type: 'STRING', description: 'Path of the file' },
-            content: { type: 'STRING', description: 'Content to write in the file' },
+            filePath: { 
+                type: 'STRING', 
+                description: 'Path of the file in format: projects/PROJECT_NAME/FILENAME (e.g., "projects/my_portfolio/index.html")'
+            },
+            content: { 
+                type: 'STRING', 
+                description: 'Complete HTML/CSS/JavaScript content to write to the file'
+            },
         },
         required: ['filePath', 'content']
     }
@@ -531,6 +673,12 @@ function extractResponseText(response) {
     } else if (response.candidates && response.candidates[0]) {
         const candidate = response.candidates[0];
         
+        // Check for malformed function call
+        if (candidate.finishReason === 'MALFORMED_FUNCTION_CALL') {
+            console.error('❌ AI made a malformed function call');
+            throw new Error('AI made a malformed function call. Please try again with a simpler description.');
+        }
+        
         if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
             return candidate.content.parts[0].text;
         } else if (candidate.text) {
@@ -583,7 +731,7 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
 }
 
 // Enhanced AI agent function with better context management
-async function runAgent(userProblem, projectName = null, isUpdate = false) {
+async function runAgent(userProblem, projectName = null, isUpdate = false, userId = null) {
     // Get or create project history
     if (!ProjectHistory.has(projectName)) {
         ProjectHistory.set(projectName, []);
@@ -595,7 +743,7 @@ async function runAgent(userProblem, projectName = null, isUpdate = false) {
     // If this is an update, read existing project files first
     if (isUpdate && projectName) {
         try {
-            const existingFiles = await readProjectFiles({ projectName });
+            const existingFiles = await readProjectFiles({ projectName }, userId);
             if (typeof existingFiles === 'object' && !existingFiles.error) {
                 // Add context about existing files to help AI understand what to update
                 currentHistory.push({
@@ -625,13 +773,12 @@ async function runAgent(userProblem, projectName = null, isUpdate = false) {
 
     while (true) {
         const response = await retryWithBackoff(async () => {
-            // Try gemini-2.5-flash first, fallback to gemini-1.5-flash if needed
-            try {
-                return await ai.models.generateContent({
-                    model: "gemini-2.5-flash",
-                    contents: currentHistory,
-                config: {
-                    systemInstruction: `🎯 YOU ARE AN ELITE FULL-STACK WEB DEVELOPER - WORLD-CLASS EXPERT
+            // Always use gemini-2.5-flash ONLY
+            return await ai.models.generateContent({
+                model: "gemini-2.5-flash",
+                contents: currentHistory,
+            config: {
+                systemInstruction: `🎯 YOU ARE AN ELITE FULL-STACK WEB DEVELOPER - WORLD-CLASS EXPERT
 
 Your websites MUST be PRODUCTION-READY, PIXEL-PERFECT, and look like they cost $10,000+ to build.
 
@@ -647,6 +794,33 @@ Your websites MUST be PRODUCTION-READY, PIXEL-PERFECT, and look like they cost $
 ✅ MOBILE-FIRST RESPONSIVE - Perfect on all screen sizes (mobile, tablet, desktop)
 ✅ PRODUCTION-READY CODE - Clean, organized, commented, professional quality
 ✅ NO GENERIC TEMPLATES - Every website should feel unique and custom-built
+✅ REAL WORKING IMAGES - Use ONLY valid Unsplash URLs, NEVER placeholders or broken links
+
+🚨 IMAGE REQUIREMENTS - CRITICAL - READ THIS FIRST:
+═══════════════════════════════════════════════════════════════════
+EVERY SINGLE <img> TAG MUST HAVE A REAL, WORKING UNSPLASH URL!
+
+❌ FORBIDDEN - NEVER USE THESE:
+• placeholder.com, example.com, lorem.com
+• Relative paths like "images/photo.jpg"
+• Generic placeholders like "image-here.jpg"
+• [image] or [photo] placeholders
+• The same Unsplash URL for multiple different images
+
+✅ REQUIRED - ALWAYS USE THESE:
+• Real Unsplash URLs: https://images.unsplash.com/photo-XXXXX?w=WIDTH
+• DIFFERENT photo ID for EACH image (don't reuse the same ID)
+• Add ?w=WIDTH for optimization (?w=1920 for hero, ?w=800 for medium, ?w=400 for thumbnails)
+
+EXAMPLES - Copy these EXACT patterns:
+Hero Image: <img src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1920" alt="Hero">
+Gallery 1:  <img src="https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=600" alt="Gallery 1">
+Gallery 2:  <img src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=600" alt="Gallery 2">
+Gallery 3:  <img src="https://images.unsplash.com/photo-1518770660439-4636190af475?w=600" alt="Gallery 3">
+Portrait 1: <img src="https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400" alt="Team Member 1">
+Portrait 2: <img src="https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400" alt="Team Member 2">
+
+If a website needs 10 images, use 10 DIFFERENT Unsplash photo IDs!
 
 ═══════════════════════════════════════════════════════════════════
 🎨 MANDATORY DESIGN STANDARDS (2025):
@@ -693,6 +867,27 @@ UI COMPONENTS:
 • Icon integration (use Unicode symbols or CSS-only icons)
 • Footer with social links and contact info
 
+IMAGES - CRITICAL REQUIREMENTS:
+🚨 USE ONLY REAL, WORKING IMAGE URLS - NO PLACEHOLDERS!
+• ALWAYS use Unsplash URLs: https://images.unsplash.com/photo-XXXXX
+• For EVERY image in the website, use a DIFFERENT Unsplash photo ID
+• Example valid URLs:
+  - Hero: https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=1920
+  - About: https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=800
+  - Gallery 1: https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=600
+  - Gallery 2: https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=600
+  - Gallery 3: https://images.unsplash.com/photo-1518770660439-4636190af475?w=600
+  - Gallery 4: https://images.unsplash.com/photo-1461749280684-dccba630e2f6?w=600
+  - Gallery 5: https://images.unsplash.com/photo-1504639725590-34d0984388bd?w=600
+  - Gallery 6: https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=600
+  - Team 1: https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400
+  - Team 2: https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400
+• NEVER use: example.com, placeholder.com, lorem.com, or [image] placeholders
+• Each <img> tag MUST have a unique, valid Unsplash URL
+• Add ?w=WIDTH parameter for optimization (e.g., ?w=1920 for hero, ?w=800 for medium, ?w=400 for small)
+• Always include descriptive alt text for accessibility
+• Use object-fit: cover for consistent image sizing
+
 ═══════════════════════════════════════════════════════════════════
 💻 TECHNICAL REQUIREMENTS (MANDATORY):
 ═══════════════════════════════════════════════════════════════════
@@ -733,8 +928,28 @@ RESPONSIVE BREAKPOINTS:
 
 When user requests:
 • "Contact form" → Build fully functional form with validation and success message
-• "Portfolio gallery" → Create grid/masonry layout with lightbox/modal functionality
+• "Portfolio gallery" → Create grid/masonry layout with lightbox/modal functionality, USE 6-12 DIFFERENT Unsplash images
 • "Pricing table" → Build comparison table with hover effects and feature highlights
+• "Team section" → Create team member cards, each with a UNIQUE Unsplash portrait image
+• "Services section" → Create service cards with icons or relevant images
+• "Testimonials" → Add client testimonials with profile images (use different Unsplash portraits)
+• "Blog section" → Create blog post cards, each with a UNIQUE Unsplash feature image
+• ANY section with images → EACH image MUST have a unique Unsplash URL, NEVER reuse the same image
+
+🚨 CRITICAL IMAGE RULES:
+1. EVERY <img> tag needs a REAL Unsplash URL
+2. NEVER use the same image URL twice (unless intentional, like a logo)
+3. For galleries with 10 images, use 10 DIFFERENT Unsplash photo IDs
+4. Example for portfolio gallery:
+   <img src="https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=600" alt="Project 1">
+   <img src="https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=600" alt="Project 2">
+   <img src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=600" alt="Project 3">
+   ... (continue with different photo IDs for each image)
+5. Common Unsplash photo IDs to use:
+   - Tech/Workspace: 1498050108023, 1460925895917, 1488590528505, 1518770660439
+   - Nature/Landscape: 1506905925346, 1470071459604, 1519681393784, 1441974231531
+   - People/Portraits: 1507003211169, 1438761681033, 1494790108377, 1500648767791
+   - Business: 1454165804606, 1486406146269, 1497215728101, 1522202757859
 • "Testimonials" → Create carousel/slider with smooth transitions
 • "Hero section" → Large, eye-catching section with CTA buttons
 • "About section" → Include image, text, and visual interest elements
@@ -780,11 +995,17 @@ Current OS: ${platform}
                 - IMAGE INTEGRATION: Use provided image URLs with proper <img> tags, responsive sizing, and accessibility
                 
                 PROJECT STRUCTURE:
+                🚨 CRITICAL: Use EXACT project name "${projectName}" - DO NOT modify or change it!
                 projects/
-                └── [projectName]/
+                └── ${projectName}/    ← USE THIS EXACT NAME, NO MODIFICATIONS!
                     ├── index.html (main page with semantic structure)
                     ├── style.css (modern, responsive styles with animations)
                     └── script.js (interactive functionality and smooth UX)
+                
+                IMPORTANT FILE PATHS (use these EXACTLY):
+                - projects/${projectName}/index.html
+                - projects/${projectName}/style.css
+                - projects/${projectName}/script.js
                 
                 ${isUpdate ? `🚨 UPDATE OPERATION RULES (CRITICAL):
                 - This is an UPDATE operation for existing project "${projectName}"
@@ -825,6 +1046,21 @@ Current OS: ${platform}
                 - Example: "Create a portfolio website in Hindi" → create website structure, then translate all text content to Hindi
                 - For multi-section websites, translate each section's content separately for better context
                 
+                🚨 FINAL REMINDER - IMAGES:
+                Before you finish, VERIFY that:
+                ✓ EVERY <img> tag has a real Unsplash URL (starts with https://images.unsplash.com/)
+                ✓ NO placeholder URLs (no example.com, placeholder.com, etc.)
+                ✓ Each image has a DIFFERENT photo ID (don't reuse the same image URL)
+                ✓ Each <img> has proper alt text for accessibility
+                ✓ Width parameters are added (?w=1920 for hero, ?w=800 for medium, ?w=400 for small)
+                
+                Common photo IDs you can use (mix and match for variety):
+                Tech: 1498050108023, 1460925895917, 1488590528505, 1518770660439, 1461749280684
+                Business: 1454165804606, 1486406146269, 1497215728101, 1522202757859, 1504639725590
+                Nature: 1506905925346, 1470071459604, 1519681393784, 1441974231531, 1501594907352
+                People: 1507003211169, 1438761681033, 1494790108377, 1500648767791, 1573496359142
+                Creative: 1517694712202, 1550745645, 1558618666, 1587440459, 1523050854612
+                
                 TOOL SELECTION RULES:
                 ${isUpdate ? `- For UPDATES: ALWAYS use updateProjectFiles tool
                 - For UPDATES: NEVER use writeToFile tool
@@ -850,193 +1086,30 @@ Current OS: ${platform}
                 maxOutputTokens: 8000,
             },
         });
-            } catch (primaryError) {
-                // If gemini-2.5-flash fails, try gemini-1.5-flash as fallback
-                if (primaryError.message && primaryError.message.includes('503')) {
-                    console.log('Primary model overloaded, trying fallback model...');
-                    return await ai.models.generateContent({
-                        model: "gemini-1.5-flash",
-                        contents: currentHistory,
-                        config: {
-                            systemInstruction: `You are an EXPERT Website Builder AI specializing in creating PROFESSIONAL, HIGH-QUALITY, and ENGAGING websites. Your goal is to exceed industry standards and create websites that look like they were built by top-tier web development agencies.
-                                    You are an Elite Website Builder AI, a world-class expert in creating professional, high-quality, and visually stunning websites.
-
-                                    Your mission is to deliver websites that rival or surpass those built by top-tier web development agencies. Every project must embody:
-
-                                    Aesthetic Excellence : pixel-perfect, modern, and premium designs.
-
-                                    User-Centered Design : seamless navigation, intuitive layouts, and engaging interactions.
-
-                                    Performance Optimization : fast loading, responsive design across devices, accessibility compliance, and SEO best practices.
-
-                                    Innovation & Trends : integration of the latest technologies, creative layouts, and advanced features.
-
-                                    Flawless Execution : code that is clean, efficient, scalable, and production-ready.
-
-                                    Your standard is perfection. Every website you create should look and perform like a finished product from a world-class web agency.
-                                    Visual Excellence :clean, modern, pixel-perfect layouts with attention to typography, spacing, color balance, and hierarchy.
-
-                                    User Experience First : intuitive navigation, clear information architecture, and designs that reduce cognitive load.
-
-                                    Consistency & Branding : cohesive visual systems that align with brand identity, style guides, and accessibility standards.
-
-                                    Interactive Elegance : smooth animations, micro-interactions, and engaging UI elements that enhance usability.
-
-                                     Adaptability : fully responsive designs that scale perfectly across mobile, tablet, and desktop.'
-
-                Current OS: ${platform}
-                
-${isUpdate ? `🚨 CRITICAL UPDATE MODE: This is an UPDATE operation for existing project "${projectName}". You MUST use the updateProjectFiles tool to modify existing files. DO NOT use writeToFile.` : ''}
-
-STEP 1: ANALYZE THE REQUEST
-• Read the user's description carefully
-• List ALL requested features and sections
-• Note design preferences (colors, style, theme)
-• Identify the website type (portfolio, business, blog, etc.)
-
-STEP 2: PLAN THE STRUCTURE
-• Plan HTML structure with all requested sections
-• Design color scheme and visual style
-• Plan all interactive features
-• Ensure mobile-responsive layout
-
-STEP 3: BUILD HTML (index.html)
-• Create semantic HTML structure
-• Include ALL requested sections
-• Add proper meta tags and SEO elements
-• Use modern HTML5 elements
-• Add data attributes for JS functionality
-
-STEP 4: BUILD CSS (style.css)
-• Define CSS variables for colors, spacing, fonts
-• Write mobile-first responsive styles
-• Add smooth animations and transitions
-• Create hover effects and interactions
-• Make it visually stunning with gradients, shadows, effects
-• IMPORTANT: Use modern design - gradients, glassmorphism, smooth animations
-
-STEP 5: BUILD JAVASCRIPT (script.js)
-• Implement ALL interactive features
-• Add smooth scroll animations
-• Create mobile menu functionality
-• Add form validation if forms exist
-• Implement any requested dynamic features
-• Add scroll animations with Intersection Observer
-
-STEP 6: VERIFY COMPLETENESS
-• Check ALL requested features are implemented
-• Verify responsive design works
-• Ensure all interactions function
-• Confirm modern, professional appearance
-
-═══════════════════════════════════════════════════════════════════
-📁 PROJECT STRUCTURE:
-═══════════════════════════════════════════════════════════════════
-
-projects/
-└── [projectName]/
-    ├── index.html (Complete HTML with ALL sections)
-    ├── style.css (Modern, responsive styles with animations)
-    └── script.js (All interactive functionality)
-
-═══════════════════════════════════════════════════════════════════
-🛠️ AVAILABLE TOOLS:
-═══════════════════════════════════════════════════════════════════
-
-• executeCommand: Run shell commands
-• writeToFile: Create new project files ${isUpdate ? '(FORBIDDEN for updates)' : '(use for NEW projects)'}
-• listProjects: List existing projects
-• readProjectFiles: Read current project files
-• updateProjectFiles: Modify existing files ${isUpdate ? '(MANDATORY for updates)' : '(use for UPDATES only)'}
-• deployProject: Deploy to Vercel with auto-configuration
-• translateContent: Translate to Indian languages (Hindi, Bengali, Telugu, Marathi, Tamil, Gujarati, Kannada)
-
-${isUpdate ? `
-═══════════════════════════════════════════════════════════════════
-🔄 UPDATE MODE - SPECIAL RULES:
-═══════════════════════════════════════════════════════════════════
-
-• This is an UPDATE for existing project "${projectName}"
-• MUST use updateProjectFiles (NOT writeToFile)
-• Read existing files first with readProjectFiles
-• Make ONLY requested changes, preserve everything else
-• For color changes: Update only specific CSS color values
-• For text changes: Update only specific HTML text content
-• Maintain existing design patterns unless asked to change
-• Keep all existing functionality intact
-• NEVER rewrite entire files - modify specific parts only
-` : `
-═══════════════════════════════════════════════════════════════════
-🎨 EXAMPLES OF PRODUCTION-READY WEBSITES:
-═══════════════════════════════════════════════════════════════════
-
-PORTFOLIO EXAMPLE:
-✅ Hero with gradient background, large name/title, animated text
-✅ About section with profile image, bio, skills with progress bars
-✅ Projects grid with hover effects, project cards with images
-✅ Contact form with validation and success message
-✅ Smooth scroll animations, fade-ins, hover effects
-✅ Modern color scheme (purple-blue gradient)
-✅ Fully responsive mobile navigation
-
-E-COMMERCE EXAMPLE:
-✅ Hero with product showcase, CTA buttons
-✅ Product grid with hover zoom effects
-✅ Product cards with pricing, ratings, add-to-cart buttons
-✅ Shopping cart functionality with localStorage
-✅ Modern gradient buttons, card shadows
-✅ Fully functional interactions
-
-BUSINESS WEBSITE EXAMPLE:
-✅ Hero with call-to-action, background video or gradient
-✅ Services section with icon cards and hover effects
-✅ Testimonials slider with smooth transitions
-✅ Pricing tables with feature comparison
-✅ Contact form with validation
-✅ Smooth animations throughout
-`}
-
-═══════════════════════════════════════════════════════════════════
-🚨 NEVER DO THESE (COMMON MISTAKES):
-═══════════════════════════════════════════════════════════════════
-
-❌ Skip requested features ("will add later", placeholders)
-❌ Use plain colors without gradients or shadows
-❌ Create static, boring designs without animations
-❌ Make non-responsive layouts
-❌ Use outdated design patterns (flat, boring colors)
-❌ Create broken functionality
-❌ Write incomplete JavaScript
-❌ Use generic, template-like designs
-❌ Forget mobile responsiveness
-❌ Skip form validation or interactive features
-
-═══════════════════════════════════════════════════════════════════
-✨ YOUR STANDARD: PERFECTION
-═══════════════════════════════════════════════════════════════════
-
-Every website you create should make the user say "WOW!"
-Build like you're charging $10,000 per website.
-Make it production-ready, launch-ready, client-ready.
-Modern. Beautiful. Functional. Complete.`,
-                tools: [{
-                    functionDeclarations: [
-                        executeCommandDeclaration,
-                        writeToFileDeclaration,
-                        listProjectsDeclaration,
-                        readProjectFilesDeclaration,
-                        updateProjectFilesDeclaration,
-                        deployProjectDeclaration,
-                        translateContentDeclaration
-                    ]
-                }],
-            },
+            // No fallback, only use gemini-2.5-flash
         });
-                } else {
-                    throw primaryError; // Re-throw if it's not a 503 error
-                }
-            }
-        });
+
+        // Check for malformed function call
+        if (response.candidates && response.candidates[0] && 
+            response.candidates[0].finishReason === 'MALFORMED_FUNCTION_CALL') {
+            console.error('❌ AI made a malformed function call, retrying with clearer instructions...');
+            
+            const errorMessage = `🚨 ERROR: Your last function call was malformed. Please follow these rules EXACTLY:
+
+1. For writeToFile, the filePath MUST be in this exact format:
+   - "projects/${projectName}/index.html"
+   - "projects/${projectName}/style.css"
+   - "projects/${projectName}/script.js"
+
+2. Make sure all required parameters are provided correctly
+3. Use valid JSON format for all arguments
+4. Do NOT add extra fields or modify the function signature
+
+Please try again with the correct format.`;
+            
+            currentHistory.push({ role: "user", parts: [{ text: errorMessage }] });
+            continue;
+        }
 
         if (response.functionCalls && response.functionCalls.length > 0) {
             const { name, args } = response.functionCalls[0];
@@ -1056,7 +1129,14 @@ Modern. Beautiful. Functional. Complete.`,
             }
 
             const funCall = availableTools[name];
-            const result = await funCall(args);
+            
+            // Pass userId for file operations and deployment
+            let result;
+            if (name === 'writeToFile' || name === 'readProjectFiles' || name === 'updateProjectFiles' || name === 'deployProject') {
+                result = await funCall(args, userId);
+            } else {
+                result = await funCall(args);
+            }
 
             const functionResponsePart = { name, response: { result } };
             currentHistory.push({ role: "model", parts: [{ functionCall: response.functionCalls[0] }] });
@@ -1394,18 +1474,19 @@ You're a web development expert who happens to have access to an amazing AI webs
 }
 
 // API Routes
-app.get('/api/projects', async (req, res) => {
+app.get('/api/projects', authenticate, async (req, res) => {
     try {
-        //console.log('API: /api/projects called');
-        const projects = await listProjects();
-        //console.log('API: Projects result:', projects);
+        console.log('API: /api/projects called for user:', req.userEmail);
         
-        // Check if projects is an error string
-        if (typeof projects === 'string' && projects.startsWith('Error:')) {
-            throw new Error(projects);
-        }
+        // Get projects from database for this user
+        const userProjects = await Project.findByUserEmail(req.userEmail);
         
-        res.json({ success: true, projects });
+        // Extract project names
+        const projectNames = userProjects.map(p => p.projectName);
+        
+        console.log(`API: Found ${projectNames.length} projects for user ${req.userEmail}`);
+        
+        res.json({ success: true, projects: projectNames });
     } catch (error) {
         console.error('API: /api/projects error:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -1413,7 +1494,7 @@ app.get('/api/projects', async (req, res) => {
 });
 
 // Delete project endpoint
-app.delete('/api/projects/:projectName', async (req, res) => {
+app.delete('/api/projects/:projectName', authenticate, async (req, res) => {
     try {
         const { projectName } = req.params;
         
@@ -1424,7 +1505,20 @@ app.delete('/api/projects/:projectName', async (req, res) => {
             });
         }
 
-        console.log(`🗑️ Deleting project: ${projectName}`);
+        console.log(`🗑️ Deleting project: ${projectName} for user: ${req.userEmail}`);
+        
+        // Check if project belongs to user
+        const project = await Project.findOne({ 
+            projectName, 
+            userEmail: req.userEmail 
+        });
+        
+        if (!project) {
+            return res.status(404).json({
+                success: false,
+                error: 'Project not found or you do not have permission to delete it'
+            });
+        }
         
         // Wait for storage to be initialized
         if (!storage || !storageReady) {
@@ -1434,14 +1528,18 @@ app.delete('/api/projects/:projectName', async (req, res) => {
             });
         }
         
-        // Delete project using storage service
-        const result = await storage.deleteProject(projectName);
+        // Delete project using storage service with userId
+        const result = await storage.deleteProject(projectName, req.userId.toString());
         
         if (!result.success) {
             throw new Error(result.message || 'Failed to delete project');
         }
         
         console.log(`✅ Deleted project from storage: ${projectName}`);
+        
+        // Delete from database
+        await Project.deleteOne({ _id: project._id });
+        console.log(`✅ Deleted project from database: ${projectName}`);
         
         // Clear project history from memory
         if (ProjectHistory.has(projectName)) {
@@ -1464,23 +1562,52 @@ app.delete('/api/projects/:projectName', async (req, res) => {
 });
 
 // Get project files from local filesystem (for loading generated projects)
-app.get('/api/files/:projectName', async (req, res) => {
+app.get('/api/files/:projectName', authenticate, async (req, res) => {
     try {
         const { projectName } = req.params;
-        const files = await readProjectFiles({ projectName });
+        
+        // Check if project belongs to user
+        const project = await Project.findOne({ 
+            projectName, 
+            userEmail: req.userEmail 
+        });
+        
+        if (!project) {
+            return res.status(404).json({
+                success: false,
+                error: 'Project not found or you do not have permission to access it'
+            });
+        }
+        
+        const files = await readProjectFiles({ projectName }, req.userId.toString());
         res.json({ success: true, files });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-app.post('/api/build', async (req, res) => {
+app.post('/api/build', authenticate, async (req, res) => {
     try {
         const { description, projectName, images } = req.body;
         if (!description || !projectName) {
             return res.status(400).json({
                 success: false,
                 error: 'Description and project name are required'
+            });
+        }
+
+        console.log(`🏗️ Building project: ${projectName} for user: ${req.userEmail}`);
+
+        // Check if project name already exists for this user
+        const existingProject = await Project.findOne({ 
+            projectName, 
+            userEmail: req.userEmail 
+        });
+        
+        if (existingProject) {
+            return res.status(400).json({
+                success: false,
+                error: `Project "${projectName}" already exists. Please choose a different name or update the existing project.`
             });
         }
 
@@ -1495,7 +1622,23 @@ app.post('/api/build', async (req, res) => {
             enhancedDescription += imageContext + imageInstructions + '\n\nMake sure to include proper <img> tags with the provided URLs and optimize them for responsive design.';
         }
 
-        const result = await runAgent(enhancedDescription, projectName, false);
+        // Pass userId to runAgent
+        const result = await runAgent(enhancedDescription, projectName, false, req.userId.toString());
+        
+        // Save project metadata to database
+        const newProject = new Project({
+            projectName,
+            userId: req.userId,
+            userEmail: req.userEmail,
+            description,
+            fileCount: 3, // HTML, CSS, JS
+            storageProvider: 'supabase',
+            status: 'active'
+        });
+        
+        await newProject.save();
+        console.log(`✅ Project metadata saved to database: ${projectName}`);
+        
         res.json({ success: true, result });
     } catch (error) {
         console.error('Build error:', error);
@@ -1523,7 +1666,7 @@ app.post('/api/build', async (req, res) => {
     }
 });
 
-app.post('/api/update', async (req, res) => {
+app.post('/api/update', authenticate, async (req, res) => {
     try {
         const { description, projectName } = req.body;
         if (!description || !projectName) {
@@ -1533,7 +1676,27 @@ app.post('/api/update', async (req, res) => {
             });
         }
 
-        const result = await runAgent(description, projectName, true);
+        console.log(`🔄 Updating project: ${projectName} for user: ${req.userEmail}`);
+
+        // Check if project belongs to user
+        const project = await Project.findOne({ 
+            projectName, 
+            userEmail: req.userEmail 
+        });
+        
+        if (!project) {
+            return res.status(404).json({
+                success: false,
+                error: 'Project not found or you do not have permission to update it'
+            });
+        }
+
+        const result = await runAgent(description, projectName, true, req.userId.toString());
+        
+        // Update project metadata in database
+        project.updatedAt = Date.now();
+        await project.save();
+        
         res.json({ success: true, result });
     } catch (error) {
         console.error('Update error:', error);
@@ -1561,7 +1724,7 @@ app.post('/api/update', async (req, res) => {
     }
 });
 
-app.post('/api/deploy', async (req, res) => {
+app.post('/api/deploy', authenticate, async (req, res) => {
     try {
         const { projectName, siteName } = req.body;
         if (!projectName) {
@@ -1571,9 +1734,26 @@ app.post('/api/deploy', async (req, res) => {
             });
         }
 
-        const result = await deployProject({ projectName, siteName });
+        console.log(`🚀 Deploying project: ${projectName} for user: ${req.userEmail}`);
+
+        // Check if project belongs to user
+        const project = await Project.findOne({ 
+            projectName, 
+            userEmail: req.userEmail 
+        });
+        
+        if (!project) {
+            return res.status(404).json({
+                success: false,
+                error: 'Project not found or you do not have permission to deploy it'
+            });
+        }
+
+        const result = await deployProject({ projectName, siteName }, req.userId.toString());
+        
         res.json({ success: true, result });
     } catch (error) {
+        console.error('Deploy error:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -2106,7 +2286,7 @@ function getGenericSearchQuery(description, websiteType, section) {
 }
 
 // Upload project endpoint - handles folder uploads
-app.post('/api/upload-project', upload.array('files', 100), async (req, res) => {
+app.post('/api/upload-project', authenticate, upload.array('files', 100), async (req, res) => {
     try {
         // Check if storage is ready
         if (!storageReady || !storage) {
@@ -2116,7 +2296,7 @@ app.post('/api/upload-project', upload.array('files', 100), async (req, res) => 
             });
         }
 
-        const { projectName, userId } = req.body;
+        const { projectName } = req.body;
         const files = req.files;
         const paths = req.body; // Contains paths[0], paths[1], etc.
 
@@ -2135,11 +2315,15 @@ app.post('/api/upload-project', upload.array('files', 100), async (req, res) => 
             });
         }
 
-        console.log(`📤 Uploading project "${projectName}" with ${files.length} files...`);
+        console.log(`📤 Uploading project "${projectName}" for user: ${req.userEmail} with ${files.length} files...`);
 
-        // Check if project already exists
-        const existingProjects = await storage.listProjects();
-        if (existingProjects.includes(projectName)) {
+        // Check if project already exists for this user
+        const existingProject = await Project.findOne({ 
+            projectName, 
+            userEmail: req.userEmail 
+        });
+        
+        if (existingProject) {
             return res.status(400).json({
                 success: false,
                 error: `Project "${projectName}" already exists. Please use a different name.`
@@ -2182,11 +2366,25 @@ app.post('/api/upload-project', upload.array('files', 100), async (req, res) => 
             fileMap['script.js'] = '// Add your JavaScript here\n';
         }
 
-        // Save all files to Supabase storage
+        // Save all files to Supabase storage with userId
         for (const [fileName, content] of Object.entries(fileMap)) {
-            await storage.saveFile(projectName, fileName, content);
+            await storage.saveFile(projectName, fileName, content, req.userId.toString());
             console.log(`  ✓ Uploaded: ${fileName}`);
         }
+
+        // Save project metadata to database
+        const newProject = new Project({
+            projectName,
+            userId: req.userId,
+            userEmail: req.userEmail,
+            description: 'Uploaded project',
+            fileCount: uploadedCount,
+            storageProvider: 'supabase',
+            status: 'active'
+        });
+        
+        await newProject.save();
+        console.log(`✅ Project metadata saved to database: ${projectName}`);
 
         console.log(`✅ Project "${projectName}" uploaded successfully! (${uploadedCount} files)`);
 
