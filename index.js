@@ -89,10 +89,11 @@ async function folderToVercelFiles(projectName, userId = null) {
 // Middleware
 // CORS Configuration - Allow frontend to connect from different domain
 app.use(cors({
-    origin: process.env.FRONTEND_URL || '*', // Set FRONTEND_URL in .env for production
+    origin: true, // Allow all origins
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Length', 'Content-Type']
 }));
 
 app.use(express.json());
