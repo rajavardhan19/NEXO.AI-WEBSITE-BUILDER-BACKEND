@@ -2404,9 +2404,24 @@ app.post('/api/upload-project', authenticate, upload.array('files', 100), async 
     }
 });
 
-// Serve the main page
+// Backend API root endpoint - no frontend serving
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, '../frontend/public', 'index.html'));
+    res.json({
+        success: true,
+        message: 'Nexo.AI Backend API',
+        version: '1.0.0',
+        status: 'running',
+        endpoints: {
+            auth: '/api/auth/*',
+            projects: '/api/projects',
+            build: '/api/build',
+            update: '/api/update',
+            deploy: '/api/deploy',
+            chat: '/api/chat',
+            files: '/api/files/:projectName'
+        },
+        documentation: 'See DEPLOYMENT_GUIDE.md for setup instructions'
+    });
 });
 
 // Test endpoint to verify Supabase storage
