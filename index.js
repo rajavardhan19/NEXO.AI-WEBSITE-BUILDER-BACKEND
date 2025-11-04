@@ -323,7 +323,8 @@ async function deployProject({ projectName, siteName = null }, userId = null) {
                 },
                 body: JSON.stringify({
                     name: cleanProjectName,
-                    framework: null
+                    framework: null,
+                    publicSource: true  // Make project source public
                 })
             });
 
@@ -355,6 +356,7 @@ async function deployProject({ projectName, siteName = null }, userId = null) {
                 outputDirectory: null
             },
             target: 'production',
+            public: true,  // Make deployment publicly accessible
             gitMetadata: {
                 remoteUrl: `https://nexo.ai/project/${vercelProjectName}`,
                 commitRef: 'main',
@@ -1243,7 +1245,7 @@ Remember: First person only ("I want..."). No headings. One flowing paragraph. N
 }
 
 // Chat API endpoint
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', authenticate, async (req, res) => {
     try {
         const { message, chatHistory, currentProject } = req.body;
 
@@ -1254,17 +1256,18 @@ app.post('/api/chat', async (req, res) => {
             });
         }
 
-        // Get or create chat history for this session
-        const sessionId = req.ip || 'default';
-        let sessionHistory = ChatHistory.get(sessionId) || [];
+        // Get or create chat history for this user (user-based instead of IP-based)
+        const userId = req.userId.toString(); // Use authenticated user ID
+        let sessionHistory = ChatHistory.get(userId) || [];
 
         // Add current message to history
         sessionHistory.push({ role: 'user', content: message });
 
-        // Get available projects for context
+        // Get available projects for this user
         let availableProjects = [];
         try {
-            availableProjects = await listProjects();
+            const projects = await Project.find({ userEmail: req.userEmail });
+            availableProjects = projects.map(p => p.projectName);
         } catch (error) {
             console.error('Error getting projects:', error);
         }
@@ -1281,10 +1284,10 @@ app.post('/api/chat', async (req, res) => {
             projectFiles: null
         };
 
-        // Get current project files if available
+        // Get current project files if available (user-specific)
         if (context.currentProject && availableProjects.includes(context.currentProject)) {
             try {
-                context.projectFiles = await readProjectFiles({ projectName: context.currentProject });
+                context.projectFiles = await storage.getProjectFiles(context.currentProject, userId);
             } catch (error) {
                 console.error('Error reading project files:', error);
             }
@@ -1309,7 +1312,7 @@ app.post('/api/chat', async (req, res) => {
             sessionHistory = sessionHistory.slice(-20);
         }
 
-        ChatHistory.set(sessionId, sessionHistory);
+        ChatHistory.set(userId, sessionHistory);
 
         res.json({
             success: true,
@@ -1335,6 +1338,27 @@ app.post('/api/chat', async (req, res) => {
             success: false,
             error: error.message,
             response: errorMessage
+        });
+    }
+});
+
+// Clear chat history for current user
+app.post('/api/chat/clear', authenticate, async (req, res) => {
+    try {
+        const userId = req.userId.toString();
+        
+        // Clear chat history for this user
+        ChatHistory.delete(userId);
+        
+        res.json({
+            success: true,
+            message: 'Chat history cleared successfully'
+        });
+    } catch (error) {
+        console.error('Error clearing chat history:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
         });
     }
 });
