@@ -1344,7 +1344,7 @@ Remember: First person only ("I want..."). No headings. One flowing paragraph. N
         console.log('🔍 Enhancing prompt:', prompt);
         
         const response = await ai.models.generateContent({
-            model: "gemini-2.0-flash-exp",
+            model: "gemini-2.5-flash",
             contents: [
                 { role: 'user', parts: [{ text: systemInstruction + "\n\n" + userPrompt }] }
             ],
