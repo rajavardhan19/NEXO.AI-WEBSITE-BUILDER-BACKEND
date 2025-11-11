@@ -99,8 +99,8 @@ router.post('/signin', async (req, res) => {
             });
         }
 
-        // Find user
-        const user = await User.findOne({ email: email.toLowerCase() });
+        // Find user (explicitly select password field since it's set to select: false)
+        const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
         if (!user) {
             return res.status(401).json({
                 success: false,

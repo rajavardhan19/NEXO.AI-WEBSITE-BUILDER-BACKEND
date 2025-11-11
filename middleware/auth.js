@@ -1,7 +1,8 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 
-const JWT_SECRET = process.env.JWT_SECRET;
+// Don't cache JWT_SECRET at module load time - read it when needed
+// const JWT_SECRET = process.env.JWT_SECRET;
 
 // Middleware to check if user is authenticated (via session or JWT)
 export const authenticate = async (req, res, next) => {
@@ -23,6 +24,12 @@ export const authenticate = async (req, res, next) => {
             const token = authHeader.substring(7);
             
             try {
+                // Read JWT_SECRET directly from process.env (not cached)
+                const JWT_SECRET = process.env.JWT_SECRET;
+                if (!JWT_SECRET) {
+                    throw new Error('JWT_SECRET not configured');
+                }
+                
                 const decoded = jwt.verify(token, JWT_SECRET);
                 const user = await User.findById(decoded.userId);
                 
@@ -74,6 +81,12 @@ export const optionalAuth = async (req, res, next) => {
                 const token = authHeader.substring(7);
                 
                 try {
+                    // Read JWT_SECRET directly from process.env (not cached)
+                    const JWT_SECRET = process.env.JWT_SECRET;
+                    if (!JWT_SECRET) {
+                        throw new Error('JWT_SECRET not configured');
+                    }
+                    
                     const decoded = jwt.verify(token, JWT_SECRET);
                     const user = await User.findById(decoded.userId);
                     

@@ -17,6 +17,10 @@ import multer from 'multer';
 // Load environment variables FIRST
 dotenv.config();
 
+// Debug: Check if JWT_SECRET is loaded
+console.log('🔑 JWT_SECRET loaded:', process.env.JWT_SECRET ? 'YES (' + process.env.JWT_SECRET.substring(0, 20) + '...)' : 'NO - MISSING!');
+console.log('🔍 All env vars loaded:', Object.keys(process.env).filter(k => k.includes('JWT') || k.includes('SECRET')).join(', '));
+
 // Import routes and middleware
 import Project from './models/Project.js';
 import { authenticate, optionalAuth } from './middleware/auth.js';
@@ -58,6 +62,8 @@ const SESSION_SECRET = process.env.SESSION_SECRET;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
+const VERCEL_PROJECT_ID = process.env.VERCEL_PROJECT_ID; // Shared project for all user deployments
+const VERCEL_TEAM_ID = process.env.VERCEL_TEAM_ID; // Optional: if using Vercel team
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const NETLIFY_TOKEN = process.env.NETLIFY_TOKEN;
 
@@ -297,19 +303,54 @@ async function deployProject({ projectName, siteName = null }, userId = null) {
 
         console.log(`✅ Found ${files.length} files to deploy:`, files.map(f => f.file).join(', '));
 
-        // Create a clean, short project name
-        // Remove special characters and convert to lowercase
-        const cleanProjectName = projectName
-            .toLowerCase()
-            .replace(/[^a-z0-9-]/g, '-')  // Replace special chars with hyphens
-            .replace(/--+/g, '-')          // Replace multiple hyphens with single
-            .replace(/^-|-$/g, '')         // Remove leading/trailing hyphens
-            .substring(0, 50);             // Limit length
+        // Determine which deployment mode to use
+        let vercelProjectName;
+        let useSharedProject = false;
         
-        console.log(`📝 Clean project name for Vercel: ${cleanProjectName}`);
-
-        // Step 1: Try to create or link to a Vercel project for shorter URLs
-        let vercelProjectName = cleanProjectName;
+        if (VERCEL_PROJECT_ID) {
+            // MODE 1: Use shared project container (recommended)
+            console.log(`📦 Using shared Vercel project container: ${VERCEL_PROJECT_ID}`);
+            vercelProjectName = VERCEL_PROJECT_ID;
+            useSharedProject = true;
+            
+            // Ensure the shared project is configured for public access
+            try {
+                const updateUrl = VERCEL_TEAM_ID 
+                    ? `https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}?teamId=${VERCEL_TEAM_ID}`
+                    : `https://api.vercel.com/v9/projects/${VERCEL_PROJECT_ID}`;
+                    
+                await fetch(updateUrl, {
+                    method: "PATCH",
+                    headers: {
+                        Authorization: `Bearer ${VERCEL_TOKEN}`,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        passwordProtection: null,
+                        ssoProtection: null,
+                        optionsAllowlist: null
+                    })
+                });
+                console.log(`✅ Ensured shared project is publicly accessible`);
+            } catch (error) {
+                console.log(`⚠️ Could not update shared project settings:`, error.message);
+            }
+        } else {
+            // MODE 2: Create individual project per upload (legacy mode)
+            console.log(`⚠️ VERCEL_PROJECT_ID not set, using legacy mode (individual projects)`);
+            console.log(`� TIP: Set VERCEL_PROJECT_ID for better management and public access`);
+            
+            // Create a clean, short project name
+            const cleanProjectName = projectName
+                .toLowerCase()
+                .replace(/[^a-z0-9-]/g, '-')
+                .replace(/--+/g, '-')
+                .replace(/^-|-$/g, '')
+                .substring(0, 50);
+            
+            console.log(`📝 Clean project name for Vercel: ${cleanProjectName}`);
+            vercelProjectName = cleanProjectName;
+            let projectCreated = false;
         
         try {
             console.log(`🔍 Checking if Vercel project exists: ${cleanProjectName}`);
@@ -324,7 +365,10 @@ async function deployProject({ projectName, siteName = null }, userId = null) {
                 body: JSON.stringify({
                     name: cleanProjectName,
                     framework: null,
-                    publicSource: true  // Make project source public
+                    publicSource: true,  // Make project source public
+                    passwordProtection: null,  // Disable password protection
+                    ssoProtection: null,  // Disable SSO protection
+                    optionsAllowlist: null  // No IP restrictions
                 })
             });
 
@@ -332,20 +376,60 @@ async function deployProject({ projectName, siteName = null }, userId = null) {
             
             if (projectResponse.ok) {
                 console.log(`✅ Created new Vercel project: ${cleanProjectName}`);
-                vercelProjectName = projectResult.name;
+                vercelProjectName = projectResult.name || projectResult.id;
+                projectCreated = true;
+                
+                // Update project settings to ensure it's public
+                try {
+                    await fetch(`https://api.vercel.com/v9/projects/${vercelProjectName}`, {
+                        method: "PATCH",
+                        headers: {
+                            Authorization: `Bearer ${VERCEL_TOKEN}`,
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            passwordProtection: null,  // No password protection
+                            ssoProtection: null,  // No SSO protection
+                            optionsAllowlist: null  // No IP restrictions
+                        })
+                    });
+                    console.log(`✅ Updated project settings to public`);
+                } catch (updateError) {
+                    console.log(`⚠️ Could not update project settings:`, updateError.message);
+                }
             } else if (projectResult.error?.code === 'project_already_exists') {
                 console.log(`✅ Using existing Vercel project: ${cleanProjectName}`);
                 vercelProjectName = cleanProjectName;
+                
+                // Update existing project to ensure it's public
+                try {
+                    await fetch(`https://api.vercel.com/v9/projects/${vercelProjectName}`, {
+                        method: "PATCH",
+                        headers: {
+                            Authorization: `Bearer ${VERCEL_TOKEN}`,
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            passwordProtection: null,
+                            ssoProtection: null,
+                            optionsAllowlist: null
+                        })
+                    });
+                    console.log(`✅ Updated existing project to public`);
+                } catch (updateError) {
+                    console.log(`⚠️ Could not update existing project:`, updateError.message);
+                }
             } else {
                 console.log(`⚠️ Could not create project, using deployment-only mode:`, projectResult.error?.message);
             }
         } catch (error) {
             console.log(`⚠️ Project creation skipped:`, error.message);
         }
+        }
 
         // Prepare deployment payload
         const deploymentPayload = {
-            name: vercelProjectName,  // Use the project name
+            name: vercelProjectName,  // Use the project name or ID
             project: vercelProjectName,  // Link to the project for short URLs
             files: files,
             projectSettings: {
@@ -356,18 +440,23 @@ async function deployProject({ projectName, siteName = null }, userId = null) {
                 outputDirectory: null
             },
             target: 'production',
-            public: true,  // Make deployment publicly accessible
             gitMetadata: {
-                remoteUrl: `https://nexo.ai/project/${vercelProjectName}`,
+                remoteUrl: `https://nexo.ai/project/${projectName}`,
                 commitRef: 'main',
                 commitSha: Date.now().toString(36)
             }
         };
 
         console.log(`📤 Sending deployment request to Vercel...`);
-        console.log(`Project name: ${deploymentPayload.name}`);
+        console.log(`Mode: ${useSharedProject ? 'Shared Project Container' : 'Individual Project'}`);
+        console.log(`Project: ${deploymentPayload.name}`);
         
-        const response = await fetch("https://api.vercel.com/v13/deployments", {
+        // Add team ID to URL if present
+        const apiEndpoint = VERCEL_TEAM_ID 
+            ? `https://api.vercel.com/v13/deployments?teamId=${VERCEL_TEAM_ID}`
+            : `https://api.vercel.com/v13/deployments`;
+        
+        const response = await fetch(apiEndpoint, {
             method: "POST",
             headers: {
                 Authorization: `Bearer ${VERCEL_TOKEN}`,
@@ -406,19 +495,61 @@ async function deployProject({ projectName, siteName = null }, userId = null) {
             return `Error: Deployment completed but no URL was returned. Response: ${JSON.stringify(result).substring(0, 200)}`;
         }
 
-        // Get the best URL - prefer production alias over preview URL
+        // Get the best URL - prefer deployment-specific URL for shared projects
         let deploymentUrl = result.url;
         
-        // Check if there's a production alias (shorter URL)
-        if (result.alias && result.alias.length > 0) {
-            // Use the shortest alias (usually the production one)
-            const shortestAlias = result.alias.sort((a, b) => a.length - b.length)[0];
-            deploymentUrl = shortestAlias;
-            console.log(`✅ Using production alias: ${shortestAlias}`);
-        } else if (vercelProjectName) {
-            // Construct the expected production URL
-            deploymentUrl = `${vercelProjectName}.vercel.app`;
-            console.log(`✅ Using project URL: ${deploymentUrl}`);
+        if (useSharedProject) {
+            // For shared projects, ALWAYS use the unique deployment URL
+            // This ensures each deployment gets its own URL (e.g., project-abc123.vercel.app)
+            console.log(`✅ Using unique deployment URL: ${deploymentUrl}`);
+            
+            // Optionally create a custom alias based on project name
+            const customAlias = projectName
+                .toLowerCase()
+                .replace(/[^a-z0-9-]/g, '-')
+                .replace(/--+/g, '-')
+                .replace(/^-|-$/g, '')
+                .substring(0, 50);
+            
+            // Try to assign a custom alias (this will fail if alias already exists, which is fine)
+            try {
+                const aliasUrl = VERCEL_TEAM_ID 
+                    ? `https://api.vercel.com/v2/deployments/${result.id}/aliases?teamId=${VERCEL_TEAM_ID}`
+                    : `https://api.vercel.com/v2/deployments/${result.id}/aliases`;
+                
+                const aliasResponse = await fetch(aliasUrl, {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${VERCEL_TOKEN}`,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        alias: `${customAlias}.vercel.app`
+                    })
+                });
+                
+                const aliasResult = await aliasResponse.json();
+                if (aliasResponse.ok && aliasResult.alias) {
+                    deploymentUrl = aliasResult.alias;
+                    console.log(`✅ Assigned custom alias: ${aliasResult.alias}`);
+                } else {
+                    console.log(`ℹ️ Custom alias not available (may already exist), using deployment URL`);
+                }
+            } catch (aliasError) {
+                console.log(`ℹ️ Could not assign custom alias:`, aliasError.message);
+            }
+        } else {
+            // For individual projects, check if there's a production alias
+            if (result.alias && result.alias.length > 0) {
+                // Use the shortest alias (usually the production one)
+                const shortestAlias = result.alias.sort((a, b) => a.length - b.length)[0];
+                deploymentUrl = shortestAlias;
+                console.log(`✅ Using production alias: ${shortestAlias}`);
+            } else if (vercelProjectName) {
+                // Construct the expected production URL
+                deploymentUrl = `${vercelProjectName}.vercel.app`;
+                console.log(`✅ Using project URL: ${deploymentUrl}`);
+            }
         }
 
         console.log(`✅ Deployment successful! URL: https://${deploymentUrl}`);
